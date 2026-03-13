@@ -113,6 +113,24 @@ def check_fact():
             'message': str(e)
         }), 500
 
+@app.errorhandler(404)
+def not_found(_error):
+    if request.path in {"/check_fact", "/api_test"}:
+        return jsonify({
+            "status": "error",
+            "message": "Endpoint not found. Verify the Render service is running the Flask app."
+        }), 404
+    return jsonify({"status": "error", "message": "Not found"}), 404
+
+@app.errorhandler(405)
+def method_not_allowed(_error):
+    if request.path in {"/check_fact", "/api_test"}:
+        return jsonify({
+            "status": "error",
+            "message": "Method not allowed. Use POST for /check_fact and GET for /api_test."
+        }), 405
+    return jsonify({"status": "error", "message": "Method not allowed"}), 405
+
 if __name__ == '__main__':
     host = os.getenv("HOST", "0.0.0.0")
     port = int(os.getenv("PORT", "5000"))

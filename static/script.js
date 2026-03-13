@@ -66,12 +66,15 @@ const postClaim = async () => {
   setLoading(true);
 
   try {
-    const response = await fetch("/check_fact", {
+    const response = await fetch(`${window.location.origin}/check_fact`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ claim })
     });
-    const payload = await response.json();
+    const contentType = response.headers.get("content-type") || "";
+    const payload = contentType.includes("application/json")
+      ? await response.json()
+      : { message: await response.text() };
     if (!response.ok) {
       throw new Error(payload.message || payload.error || "Fact check failed");
     }
@@ -89,8 +92,11 @@ const testApi = async () => {
   apiTestButton.textContent = "Testing...";
 
   try {
-    const response = await fetch("/api_test");
-    const payload = await response.json();
+    const response = await fetch(`${window.location.origin}/api_test`);
+    const contentType = response.headers.get("content-type") || "";
+    const payload = contentType.includes("application/json")
+      ? await response.json()
+      : { message: await response.text() };
     if (!response.ok) {
       throw new Error(payload.message || "API test failed");
     }
