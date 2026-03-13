@@ -9,9 +9,6 @@ import json
 import ssl
 from dotenv import load_dotenv
 
-# Disable SSL verification for testing
-ssl._create_default_https_context = ssl._create_unverified_context
-
 def test_direct_api():
     """Test the API using direct HTTP requests"""
     # Load token from .env
@@ -19,10 +16,10 @@ def test_direct_api():
     api_token = os.getenv("HUGGINGFACE_API_TOKEN")
     
     if not api_token:
-        print("❌ ERROR: No API token found in .env file")
+        print("ERROR: No API token found in .env file")
         return False
     
-    print(f"✅ Found API token: {api_token[:5]}...")
+    print("Found API token.")
     
     # API endpoint URL
     url = "https://api-inference.huggingface.co/models/facebook/bart-large-mnli"
@@ -42,12 +39,17 @@ def test_direct_api():
     }
     
     try:
-        print("🔄 Sending request to Hugging Face API...")
+        disable_ssl_verify = os.getenv("HF_DISABLE_SSL_VERIFY", "").strip().lower() in {"1", "true", "yes"}
+        if disable_ssl_verify:
+            ssl._create_default_https_context = ssl._create_unverified_context
+            print("WARNING: SSL verification is disabled for this test.")
+
+        print("Sending request to Hugging Face API...")
         response = requests.post(
             url, 
             headers=headers, 
             json=data,
-            verify=False,  # Disable SSL verification
+            verify=not disable_ssl_verify,
             timeout=15
         )
         
@@ -56,13 +58,13 @@ def test_direct_api():
         
         # Parse JSON response
         result = response.json()
-        print("✅ API request successful!")
+        print("API request successful.")
         print(f"Response status code: {response.status_code}")
         print(f"Response content: {json.dumps(result, indent=2)}")
         return True
         
     except requests.exceptions.RequestException as e:
-        print(f"❌ API request failed: {str(e)}")
+        print(f"API request failed: {str(e)}")
         if hasattr(e, 'response') and e.response:
             print(f"Response status code: {e.response.status_code}")
             print(f"Response content: {e.response.text}")
@@ -73,9 +75,9 @@ if __name__ == "__main__":
     success = test_direct_api()
     
     if success:
-        print("\n✅ API TEST PASSED: Connection successful")
+        print("\nAPI TEST PASSED: Connection successful")
     else:
-        print("\n❌ API TEST FAILED: Could not connect to Hugging Face API")
+        print("\nAPI TEST FAILED: Could not connect to Hugging Face API")
         print("\nTroubleshooting steps:")
         print("1. Check if your API token is valid at huggingface.co/settings/tokens")
         print("2. Check your internet connection")

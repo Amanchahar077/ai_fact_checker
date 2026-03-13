@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI Fact Checker</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="bg-gradient"></div>
+  <main class="page">
+    <header class="hero">
+      <p class="eyebrow">AI Fact Checker</p>
+      <h1>Fact Check Before You Forward</h1>
+      <p class="subtitle">Paste a claim, verify it with our AI pipeline, and get a clean, evidence-led verdict in seconds.</p>
+    </header>
+
+    <section class="glass-card">
+      <label class="field-label" for="claim">Claim</label>
+      <div class="input-wrap">
+        <textarea id="claim" placeholder="Paste a claim to verify..."></textarea>
+        <div class="input-glow"></div>
+      </div>
+
+      <div class="actions">
+        <button id="submit" class="btn btn-primary">
+          <span class="btn-text">Check Fact</span>
+          <span class="spinner" aria-hidden="true"></span>
+        </button>
+        <button id="apiTest" class="btn btn-ghost" type="button">Test API</button>
+      </div>
+
+      <div class="chips">
+        <button class="chip" type="button" data-claim="The Earth is round.">Earth is round</button>
+        <button class="chip" type="button" data-claim="Vaccines cause autism.">Vaccines cause autism</button>
+        <button class="chip" type="button" data-claim="Water boils at 100 C at sea level.">Water boiling point</button>
+      </div>
+
+      <section id="result" class="result" aria-live="polite">
+        <div class="result-header">
+          <span id="verdict" class="badge">Status</span>
+          <span id="confidence" class="confidence">Confidence: 0%</span>
+        </div>
+        <p id="origin" class="meta">Inference source: local fallback</p>
+        <ul id="evidence" class="evidence"></ul>
+        <p id="error" class="error"></p>
+      </section>
+    </section>
+  </main>
+
+  <script src="/static/script.js"></script>
+</body>
+</html>

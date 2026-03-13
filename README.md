@@ -12,7 +12,7 @@ A focused fact-checking application using Hugging Face's state-of-the-art AI mod
 ## Technologies Used
 
 - **Backend**: Flask, Python
-- **Frontend**: HTML, CSS, JavaScript, Bootstrap 5
+- **Frontend**: HTML, CSS, JavaScript
 - **AI & ML**: Hugging Face Transformers, BART for natural language inference
 - **Data Processing**: NLTK for text preprocessing
 

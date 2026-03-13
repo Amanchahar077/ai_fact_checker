@@ -1,12 +1,20 @@
 from flask import Flask, render_template, request, jsonify
 from dotenv import load_dotenv
 import os
+import requests
+import logging
 from hf_fact_checker import HuggingFaceFactChecker
 from news_verifier import NewsVerifier
 from source_validator import SourceValidator
 
+try:
+    from waitress import serve
+except ImportError:
+    serve = None
+
 # Load environment variables from .env file
 load_dotenv()
+logging.getLogger("waitress").setLevel(logging.WARNING)
 
 app = Flask(__name__)
 
@@ -21,41 +29,52 @@ source_validator = SourceValidator()
 def home():
     return render_template('index.html')
 
+def _api_test_allowed() -> bool:
+    allow_flag = os.getenv("ALLOW_API_TEST", "").strip().lower() in {"1", "true", "yes"}
+    return request.remote_addr in {"127.0.0.1", "::1"} or allow_flag
+
 @app.route('/api_test', methods=['GET'])
 def api_test():
     """Diagnostic endpoint to test API connectivity"""
+    if not _api_test_allowed():
+        return jsonify({
+            'status': 'error',
+            'message': 'API test is disabled'
+        }), 403
+
+    api_token = os.getenv("HUGGINGFACE_API_TOKEN")
     try:
-        # Get the API token
-        api_token = os.getenv("HUGGINGFACE_API_TOKEN")
-        
-        # Create a temporary direct client for testing
-        from huggingface_hub import InferenceClient
-        test_client = InferenceClient(token=api_token)
-        
-        # Test with a simple query
-        test_response = test_client.post(
-            model="facebook/bart-large-mnli",
-            data={"inputs": "This is a test.", "parameters": {"candidate_labels": ["true", "false"]}},
+        if not api_token:
+            raise ValueError("HUGGINGFACE_API_TOKEN is not configured")
+
+        test_response = requests.post(
+            "https://router.huggingface.co/hf-inference/models/facebook/bart-large-mnli",
+            headers={
+                "Authorization": f"Bearer {api_token}",
+                "Content-Type": "application/json"
+            },
+            json={"inputs": "This is a test.", "parameters": {"candidate_labels": ["true", "false"]}},
+            verify=fact_checker.verify_ssl,
             timeout=15
         )
+        test_response.raise_for_status()
         
         # Return the response and status
         return jsonify({
             'status': 'success',
-            'message': 'API connection successful',
-            'token_starts_with': api_token[:5] + '...' if api_token else 'No token',
-            'token_length': len(api_token) if api_token else 0,
-            'response': test_response
+            'message': 'API connection successful'
         })
-    except Exception as e:
-        # Return detailed error information
+    except requests.HTTPError as e:
+        message = fact_checker._explain_hf_http_error(e)
         return jsonify({
             'status': 'error',
-            'message': f'API connection failed: {str(e)}',
-            'token_starts_with': api_token[:5] + '...' if api_token else 'No token',
-            'token_length': len(api_token) if api_token else 0,
-            'error_type': type(e).__name__,
-            'error_details': str(e)
+            'message': message
+        }), 500
+    except Exception as e:
+        # Return error information
+        return jsonify({
+            'status': 'error',
+            'message': f'API connection failed: {str(e)}'
         }), 500
 
 @app.route('/check_fact', methods=['POST'])
@@ -77,7 +96,8 @@ def check_fact():
             'confidence': result['confidence'],
             'evidence': result['evidence'],
             'api_used': result.get('api_used', False),
-            'api_corrected': result.get('api_corrected', False)
+            'api_corrected': result.get('api_corrected', False),
+            'api_error': result.get('api_error')
         }
         
         # Log the response for debugging
@@ -94,6 +114,11 @@ def check_fact():
         }), 500
 
 if __name__ == '__main__':
+    host = os.getenv("HOST", "0.0.0.0")
+    port = int(os.getenv("PORT", "5000"))
     print("AI Fact Checker is running!")
-    print("Open http://127.0.0.1:5000 in your browser")
-    app.run(debug=True) 
+    print(f"Listening on http://{host}:{port}")
+    if serve:
+        serve(app, host=host, port=port)
+    else:
+        app.run(debug=False, use_reloader=False, host=host, port=port)

@@ -1,48 +1,47 @@
 from typing import Dict, Any, List
 import os
 import requests
-import nltk
-from nltk.tokenize import word_tokenize
-from nltk.corpus import stopwords
 import re
-from transformers import AutoTokenizer, AutoModelForSequenceClassification
-import torch
-import numpy as np
-from huggingface_hub import InferenceClient
 import logging
 import urllib3
-import ssl
 import time
 import copy
+
+try:
+    import nltk
+    from nltk.tokenize import word_tokenize
+    from nltk.corpus import stopwords
+except ImportError:
+    nltk = None
+    word_tokenize = None
+    stopwords = None
+
+try:
+    from transformers import AutoTokenizer, AutoModelForSequenceClassification
+except ImportError:
+    AutoTokenizer = None
+    AutoModelForSequenceClassification = None
+
+try:
+    import torch
+except ImportError:
+    torch = None
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Disable SSL verification warnings
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
-# Disable SSL verification globally (use with caution - this is for testing only)
-try:
-    # For Python >= 2.7.9
-    ssl._create_default_https_context = ssl._create_unverified_context
-    logger.info("Disabled SSL verification globally")
-except AttributeError:
-    # Legacy Python that doesn't verify HTTPS certificates by default
-    pass
-
 class HuggingFaceFactChecker:
     def __init__(self, skip_api_test=False):
-        # Download required NLTK data
-        try:
-            nltk.data.find('tokenizers/punkt')
-            nltk.data.find('corpora/stopwords')
-        except LookupError:
-            nltk.download('punkt')
-            nltk.download('stopwords')
-        
-        self.stop_words = set(stopwords.words('english'))
+        self.stop_words = self._load_stop_words()
         self.api_available = False
+        self.tokenizer = None
+        self.sentiment_model = None
+        self.verify_ssl = os.getenv("HF_VERIFY_SSL", "true").strip().lower() not in {"0", "false", "no"}
+
+        if not self.verify_ssl:
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+            logger.warning("HF_VERIFY_SSL is disabled; HTTPS certificate verification is off")
         
         # Initialize Hugging Face API token
         self.hf_token = os.getenv("HUGGINGFACE_API_TOKEN")
@@ -50,7 +49,7 @@ class HuggingFaceFactChecker:
             logger.warning("HUGGINGFACE_API_TOKEN not found in environment variables")
             logger.warning("Will use fallback knowledge base only")
         else:
-            logger.info(f"Found API token: {self.hf_token[:5]}...")
+            logger.info("Found API token.")
             
             # Test the API connection if not skipped
             if not skip_api_test:
@@ -61,18 +60,19 @@ class HuggingFaceFactChecker:
                 except Exception as e:
                     logger.warning(f"API connection test failed, will use fallbacks: {str(e)}")
             else:
-                logger.info("Skipping API test as requested")
                 self.api_available = True  # Assume it's available but we'll handle errors during actual use
         
         # Initialize model for sentiment analysis to help evaluate claims
-        logger.info("Loading sentiment analysis model...")
-        try:
-            self.tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased-finetuned-sst-2-english")
-            self.sentiment_model = AutoModelForSequenceClassification.from_pretrained("distilbert-base-uncased-finetuned-sst-2-english")
-            logger.info("Sentiment analysis model loaded successfully")
-        except Exception as e:
-            logger.error(f"Failed to load sentiment analysis model: {str(e)}")
-            # We'll still continue even if this fails
+        if AutoTokenizer and AutoModelForSequenceClassification and torch:
+            logger.info("Loading sentiment analysis model...")
+            try:
+                self.tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased-finetuned-sst-2-english")
+                self.sentiment_model = AutoModelForSequenceClassification.from_pretrained("distilbert-base-uncased-finetuned-sst-2-english")
+                logger.info("Sentiment analysis model loaded successfully")
+            except Exception as e:
+                logger.warning(f"Failed to load sentiment analysis model: {str(e)}")
+        else:
+            logger.debug("Transformers stack not installed; using lightweight fallback analysis")
         
         # Common knowledge facts as fallback
         self.knowledge_base = {
@@ -118,7 +118,7 @@ class HuggingFaceFactChecker:
             },
             "water": {
                 "boils": {"verdict": "true", "confidence": 0.99,
-                         "evidence": ["Water boils at 100°C (212°F) at standard atmospheric pressure",
+                         "evidence": ["Water boils at 100 C (212 F) at standard atmospheric pressure",
                                      "This is a well-established physical property",
                                      "Boiling point varies with pressure and dissolved substances"]},
                 "wet": {"verdict": "true", "confidence": 0.95,
@@ -137,6 +137,31 @@ class HuggingFaceFactChecker:
                                     "Thousands of people would need to maintain the conspiracy"]}
             }
         }
+
+    def _load_stop_words(self) -> set[str]:
+        if nltk and stopwords:
+            try:
+                nltk.data.find('tokenizers/punkt')
+                nltk.data.find('corpora/stopwords')
+            except LookupError:
+                logger.info("NLTK data not available locally; using built-in stop words")
+            else:
+                return set(stopwords.words('english'))
+
+        return {
+            "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "has",
+            "he", "in", "is", "it", "its", "of", "on", "that", "the", "to", "was",
+            "were", "will", "with", "this", "these", "those", "their", "they", "you",
+            "your", "or", "if", "but", "not"
+        }
+
+    def _tokenize_claim(self, claim: str) -> List[str]:
+        if word_tokenize and nltk:
+            try:
+                return word_tokenize(claim)
+            except LookupError:
+                logger.info("NLTK punkt tokenizer unavailable; using regex tokenization")
+        return re.findall(r"\b\w+\b", claim)
     
     def _test_api_connection(self, max_retries=2, retry_delay=1):
         """Test the API connection with a simple query and retry on failure"""
@@ -148,7 +173,7 @@ class HuggingFaceFactChecker:
                 logger.info(f"Testing API connection (attempt {attempt+1}/{max_retries})...")
                 
                 # API endpoint URL
-                url = "https://api-inference.huggingface.co/models/facebook/bart-large-mnli"
+                url = "https://router.huggingface.co/hf-inference/models/facebook/bart-large-mnli"
                 
                 # Headers with authorization
                 headers = {
@@ -169,7 +194,7 @@ class HuggingFaceFactChecker:
                     url, 
                     headers=headers, 
                     json=data,
-                    verify=False,  # Disable SSL verification
+                    verify=self.verify_ssl,
                     timeout=10  # Add timeout to prevent hanging
                 )
                 
@@ -182,6 +207,13 @@ class HuggingFaceFactChecker:
                 
                 logger.info("API connection test successful")
                 return True
+            except requests.HTTPError as e:
+                last_error = RuntimeError(self._explain_hf_http_error(e))
+                logger.warning(f"API test attempt {attempt+1} failed: {last_error}")
+                attempt += 1
+                if attempt < max_retries:
+                    logger.info(f"Retrying in {retry_delay} seconds...")
+                    time.sleep(retry_delay)
             except Exception as e:
                 last_error = e
                 logger.warning(f"API test attempt {attempt+1} failed: {str(e)}")
@@ -193,6 +225,27 @@ class HuggingFaceFactChecker:
         # If we get here, all attempts failed
         logger.error(f"All API connection test attempts failed: {str(last_error)}")
         raise last_error
+
+    def _explain_hf_http_error(self, error: requests.HTTPError) -> str:
+        status_code = error.response.status_code if error.response is not None else None
+
+        if status_code == 401:
+            return (
+                "Hugging Face rejected the token with 401 Unauthorized. "
+                "Create a fresh token at https://huggingface.co/settings/tokens and update HUGGINGFACE_API_TOKEN."
+            )
+        if status_code == 403:
+            return (
+                "Hugging Face returned 403 Forbidden. The token likely does not have Inference Providers access "
+                "or the account does not have permission for this inference route. Create a token with inference "
+                "permissions and verify your HF account billing/provider access."
+            )
+        if status_code == 404:
+            return "The selected Hugging Face model endpoint was not found."
+        if status_code == 410:
+            return "The selected Hugging Face model endpoint is no longer available on this route."
+
+        return f"Hugging Face request failed with HTTP {status_code}: {error}"
     
     def analyze_claim(self, claim: str) -> Dict[str, Any]:
         """
@@ -201,6 +254,8 @@ class HuggingFaceFactChecker:
         """
         logger.info(f"Analyzing claim: {claim}")
         
+        api_error = None
+
         # First attempt: Use Hugging Face's API for claim verification if available
         if self.api_available and self.hf_token:
             try:
@@ -225,7 +280,8 @@ class HuggingFaceFactChecker:
                 return fact_check_result
                 
             except Exception as e:
-                logger.error(f"API fact check failed: {str(e)}")
+                api_error = str(e)
+                logger.error(f"API fact check failed: {api_error}")
                 logger.info("Falling back to knowledge base...")
         else:
             logger.info("API not available, using knowledge base...")
@@ -239,6 +295,8 @@ class HuggingFaceFactChecker:
             # Flag for UI to show as local database
             matched_result['api_used'] = False
             matched_result['api_corrected'] = False
+            if api_error:
+                matched_result['api_error'] = api_error
             return matched_result
         
         # Last resort: sentiment analysis
@@ -246,6 +304,8 @@ class HuggingFaceFactChecker:
         result = self._sentiment_based_analysis(claim)
         result['api_used'] = False
         result['api_corrected'] = False
+        if api_error:
+            result['api_error'] = api_error
         return result
     
     def _preprocess_claim(self, claim: str) -> str:
@@ -259,7 +319,7 @@ class HuggingFaceFactChecker:
         claim = re.sub(r'[^\w\s]', '', claim)
         
         # Tokenize and remove stop words
-        tokens = word_tokenize(claim)
+        tokens = self._tokenize_claim(claim)
         tokens = [token for token in tokens if token not in self.stop_words]
         
         return ' '.join(tokens)
@@ -322,12 +382,12 @@ class HuggingFaceFactChecker:
         """
         logger.info("Making direct API call to Hugging Face...")
         
-        # Using the model fine-tuned on FEVER dataset for better fact verification
-        model_name = "MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli"
+        # Use a broadly supported zero-shot model on the official HF inference route.
+        model_name = "facebook/bart-large-mnli"
         logger.info(f"Using model: {model_name}")
         
         # API endpoint URL
-        url = f"https://api-inference.huggingface.co/models/{model_name}"
+        url = f"https://router.huggingface.co/hf-inference/models/{model_name}"
         
         # Headers with authorization
         headers = {
@@ -335,11 +395,12 @@ class HuggingFaceFactChecker:
             "Content-Type": "application/json"
         }
         
-        # Improve the query format with a hypothesis for better NLI performance
+        # Ask the zero-shot model to classify the claim directly.
         data = {
             "inputs": claim,
             "parameters": {
-                "candidate_labels": ["entailment", "contradiction", "neutral"]
+                "candidate_labels": ["true", "false", "unverified"],
+                "multi_label": False
             }
         }
         
@@ -348,20 +409,27 @@ class HuggingFaceFactChecker:
             url, 
             headers=headers, 
             json=data,
-            verify=False,  # Disable SSL verification
+            verify=self.verify_ssl,
             timeout=timeout
         )
         
         # Check if request was successful
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except requests.HTTPError as error:
+            raise RuntimeError(self._explain_hf_http_error(error)) from error
         
         # Parse JSON response
         result = response.json()
         logger.info(f"Received API response: {result}")
         
-        # Process the response
-        scores = result['scores']
-        labels = result['labels']
+        # Process either legacy {"labels": [...], "scores": [...]} or current [{"label": ..., "score": ...}] format.
+        if isinstance(result, list):
+            labels = [item["label"] for item in result]
+            scores = [item["score"] for item in result]
+        else:
+            labels = result["labels"]
+            scores = result["scores"]
         
         # Get the highest scoring label
         max_score_index = scores.index(max(scores))
@@ -369,13 +437,7 @@ class HuggingFaceFactChecker:
         confidence = scores[max_score_index]
         
         # Map the model's output to our verdict format
-        verdict_map = {
-            "entailment": "true",
-            "contradiction": "false", 
-            "neutral": "unverified"
-        }
-        
-        verdict = verdict_map.get(raw_verdict.lower(), "unverified")
+        verdict = raw_verdict.lower()
         
         # Try to extract potential correct information for false claims
         potential_correction = None
@@ -388,14 +450,14 @@ class HuggingFaceFactChecker:
             evidence = [
                 f"Based on fact-checking analysis, this claim appears to be FALSE.",
                 f"CORRECTION: {potential_correction}",
-                f"This conclusion is based on the Hugging Face DeBERTa model trained on the FEVER dataset."
+                f"This conclusion is based on the Hugging Face zero-shot classification API."
             ]
         elif verdict == "true":
             # For true claims
             evidence = [
                 f"Based on fact-checking analysis, this claim appears to be TRUE.",
                 f"Confidence score: {confidence:.2f}",
-                f"This conclusion is based on the Hugging Face DeBERTa model trained on the FEVER dataset."
+                f"This conclusion is based on the Hugging Face zero-shot classification API."
             ]
         else:
             # For unverified claims
@@ -445,7 +507,7 @@ class HuggingFaceFactChecker:
             "moon landing fake": "The Moon landings were real. Multiple independent sources including the Soviet Union (who were rivals) confirmed them, and reflectors left on the lunar surface can still be detected from Earth today.",
             
             # Sun facts
-            "sun is cold": "The Sun is extremely hot with a surface temperature of about 5,500°C (9,940°F) and a core temperature of about 15 million°C (27 million°F).",
+            "sun is cold": "The Sun is extremely hot with a surface temperature of about 5,500 C (9,940 F) and a core temperature of about 15 million C (27 million F).",
             "sun orbits earth": "The Earth orbits the Sun, not the other way around. This heliocentric model was confirmed by observations from Copernicus, Galileo, and modern astronomy.",
             "sun is a planet": "The Sun is a star, not a planet. It's a massive ball of hot plasma that generates energy through nuclear fusion.",
             
@@ -455,7 +517,7 @@ class HuggingFaceFactChecker:
             
             # Climate facts
             "climate change is a hoax": "Climate change is supported by overwhelming scientific evidence including temperature records, ice core samples, and observable impacts. Over 97% of climate scientists agree it is real and primarily human-caused.",
-            "global warming not real": "Global warming is real and documented by multiple independent scientific organizations tracking Earth's temperature. The planet's average temperature has risen by about 1°C since the pre-industrial era.",
+            "global warming not real": "Global warming is real and documented by multiple independent scientific organizations tracking Earth's temperature. The planet's average temperature has risen by about 1 C since the pre-industrial era.",
             
             # Health facts
             "smoking is healthy": "Smoking is extremely harmful to health and is a leading cause of preventable diseases and death worldwide. It increases risk of cancer, heart disease, stroke, and many other health problems.",
@@ -487,7 +549,7 @@ class HuggingFaceFactChecker:
                 "spain": "Madrid",
                 "canada": "Ottawa",
                 "australia": "Canberra",
-                "brazil": "Brasília",
+                "brazil": "Brasilia",
                 "russia": "Moscow",
                 "mexico": "Mexico City",
                 "south africa": "Pretoria (administrative), Cape Town (legislative), Bloemfontein (judicial)",
@@ -522,8 +584,8 @@ class HuggingFaceFactChecker:
         
         # Basic scientific facts
         scientific_facts = {
-            "water boils": "Water boils at 100°C (212°F) at standard atmospheric pressure at sea level. The boiling point decreases with increasing altitude.",
-            "water freezes": "Water freezes at 0°C (32°F) at standard atmospheric pressure.",
+            "water boils": "Water boils at 100 C (212 F) at standard atmospheric pressure at sea level. The boiling point decreases with increasing altitude.",
+            "water freezes": "Water freezes at 0 C (32 F) at standard atmospheric pressure.",
             "gravity pulls": "Gravity is a fundamental force that attracts objects with mass toward each other. On Earth, gravity accelerates objects at approximately 9.8 m/s².",
             "evolution": "Evolution by natural selection is the scientific theory explaining how species change over time through genetic variations and selective pressures, supported by extensive fossil records and genetic evidence."
         }
@@ -540,6 +602,9 @@ class HuggingFaceFactChecker:
         Use sentiment analysis as a fallback method for basic claim analysis
         """
         try:
+            if not (self.tokenizer and self.sentiment_model and torch):
+                raise RuntimeError("Sentiment model unavailable")
+
             # Tokenize and prepare the claim for sentiment analysis
             inputs = self.tokenizer(claim, return_tensors="pt", truncation=True, max_length=512)
             outputs = self.sentiment_model(**inputs)
@@ -597,16 +662,39 @@ class HuggingFaceFactChecker:
             }
             
         except Exception as e:
-            logger.error(f"Error in sentiment analysis: {e}")
+            logger.warning(f"Error in sentiment analysis: {e}")
+
+            claim_lower = claim.lower()
+            positive_signals = ["proven", "always", "definitely", "guaranteed", "miracle", "cure"]
+            negative_signals = ["hoax", "conspiracy", "fake", "secret", "cover-up", "scam"]
+
+            if any(signal in claim_lower for signal in negative_signals):
+                confidence = 0.55
+                evidence = [
+                    "The claim uses language commonly associated with unsupported or conspiratorial framing.",
+                    "No direct evidence could be verified in the current runtime environment.",
+                    "Independent corroboration from reliable sources is recommended."
+                ]
+            elif any(signal in claim_lower for signal in positive_signals):
+                confidence = 0.5
+                evidence = [
+                    "The claim contains certainty-heavy language, which often requires stronger supporting evidence.",
+                    "No direct evidence could be verified in the current runtime environment.",
+                    "Independent corroboration from reliable sources is recommended."
+                ]
+            else:
+                confidence = 0.4
+                evidence = [
+                    "No direct verification source was available, so this result is a low-confidence fallback.",
+                    "The claim did not match the built-in knowledge base.",
+                    "Independent corroboration from reliable sources is recommended."
+                ]
+
             # Ultimate fallback with very clear uncertainty
             return {
                 'verdict': "unverified",
-                'confidence': 0.3,
-                'evidence': [
-                    "Unable to verify this claim due to technical limitations",
-                    "Consider checking with established fact-checking sources",
-                    "No definitive determination could be made"
-                ],
+                'confidence': confidence,
+                'evidence': evidence,
                 'biases': ["System limitations prevent thorough analysis"],
                 'context': ["Seek professional fact-checking services for verification"]
             }
@@ -633,13 +721,12 @@ class HuggingFaceFactChecker:
                 "germany": "berlin",
                 "japan": "tokyo",
                 "china": "beijing",
-                "india": "delhi",
+                "india": "new delhi",
                 "australia": "canberra",
                 "canada": "ottawa",
                 "brazil": "brasilia",
                 "mexico": "mexico city",
                 "russia": "moscow",
-                "south africa": "pretoria",
                 "italy": "rome",
                 "spain": "madrid",
                 "portugal": "lisbon",
@@ -770,7 +857,7 @@ class HuggingFaceFactChecker:
                             else:
                                 # Create a correction based on the false claim
                                 if celestial_body == "sun" and property_name == "cold":
-                                    correction = "The Sun is extremely hot with a surface temperature of about 5,500°C (9,940°F)."
+                                    correction = "The Sun is extremely hot with a surface temperature of about 5,500 C (9,940 F)."
                                 elif celestial_body == "earth" and property_name == "flat":
                                     correction = "Earth is an oblate spheroid (slightly flattened sphere), not flat."
                                 elif celestial_body == "moon" and property_name == "made of cheese":
